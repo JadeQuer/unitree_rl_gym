@@ -34,6 +34,14 @@ def pd_control(
     return (target_q - q) * kp + (target_dq - dq) * kd
 
 
+def get_heading(quaternion: np.ndarray) -> float:
+    qw, qx, qy, qz = quaternion
+    return np.arctan2(
+        2 * (qw * qz + qx * qy),
+        1 - 2 * (qy * qy + qz * qz),
+    )
+
+
 def load_config(config_name: str) -> dict:
     config_path = Path(LEGGED_GYM_ROOT_DIR) / "deploy" / "deploy_mujoco" / "configs" / config_name
     with open(config_path, "r", encoding="utf-8") as f:
@@ -45,6 +53,23 @@ def resolve_output_path(output: Optional[str], model_path: Path, suffix: str) ->
         return Path(output).expanduser().resolve()
     stem = model_path.stem
     return Path(LEGGED_GYM_ROOT_DIR) / "reports" / f"{stem}{suffix}"
+
+
+def add_goal_marker(renderer: mujoco.Renderer, goal_xyz: np.ndarray) -> None:
+    geom = renderer.scene.geoms[renderer.scene.ngeom]
+    mujoco.mjv_initGeom(
+        geom,
+        mujoco.mjtGeom.mjGEOM_SPHERE,
+        np.array([0.06, 0.06, 0.06], dtype=np.float32),
+        goal_xyz.astype(np.float32),
+        np.eye(3, dtype=np.float32).reshape(-1),
+        np.array([1.0, 0.2, 0.2, 1.0], dtype=np.float32),
+    )
+    geom.emission = 0.8
+    geom.specular = 0.3
+    geom.shininess = 0.8
+    geom.segid = -1
+    renderer.scene.ngeom = min(renderer.scene.ngeom + 1, len(renderer.scene.geoms))
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,8 +117,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--format",
         choices=("gif", "mp4"),
-        default="gif",
+        default="mp4",
         help="Output format (default: gif)",
+    )
+    parser.add_argument(
+        "--goal",
+        type=float,
+        nargs=2,
+        default=(4.0, 0.0),
+        metavar=("X", "Y"),
+        help="Local goal position in the world frame relative to start (default: 4.0 0.0)",
     )
     return parser.parse_args()
 
@@ -125,6 +158,7 @@ def main() -> None:
     num_actions = config["num_actions"]
     num_obs = config["num_obs"]
     cmd = np.array(config["cmd_init"], dtype=np.float32)
+    goal = np.array(args.goal, dtype=np.float32)
 
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
@@ -145,8 +179,12 @@ def main() -> None:
     steps = int(args.duration / simulation_dt)
     render_every = max(1, int((1 / args.fps) / simulation_dt))
     frames = []
+    start_xy = None
 
     for step in range(steps):
+        if start_xy is None:
+            start_xy = data.qpos[:2].copy()
+
         torques = pd_control(
             target_dof_pos,
             data.qpos[7:],
@@ -173,6 +211,19 @@ def main() -> None:
             sin_phase = np.sin(2 * np.pi * phase)
             cos_phase = np.cos(2 * np.pi * phase)
 
+            goal_vec = goal + start_xy - data.qpos[:2]
+            goal_dist = np.linalg.norm(goal_vec) + 1e-6
+            goal_dir = goal_vec / goal_dist
+            heading = get_heading(data.qpos[3:7].copy())
+            goal_heading = np.arctan2(goal_dir[1], goal_dir[0])
+            heading_error = (goal_heading - heading + np.pi) % (2 * np.pi) - np.pi
+
+            cmd[0] = np.clip(goal_dist * 0.45, 0.0, 0.5)
+            if goal_dist < 0.45:
+                cmd[0] = 0.0
+            cmd[1] = np.clip(goal_dir[1] * 0.15, -0.15, 0.15)
+            cmd[2] = np.clip(heading_error * 0.8, -0.5, 0.5)
+
             obs[:3] = omega
             obs[3:6] = gravity
             obs[6:9] = cmd * cmd_scale
@@ -190,6 +241,8 @@ def main() -> None:
         if step % render_every == 0:
             camera.lookat[:] = np.array([data.qpos[0], data.qpos[1], 0.8])
             renderer.update_scene(data, camera=camera)
+            goal_world = np.array([start_xy[0] + goal[0], start_xy[1] + goal[1], 0.8], dtype=np.float32)
+            add_goal_marker(renderer, goal_world)
             frames.append(renderer.render().copy())
 
     if args.format == "gif":
