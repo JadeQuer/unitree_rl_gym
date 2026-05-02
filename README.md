@@ -117,6 +117,24 @@ The default model is located at `deploy/pre_train/{robot}/motion.pt`; custom-tra
 |--- | --- | --- |
 | [![mujoco_g1](https://oss-global-cdn.unitree.com/static/244cd5c4f823495fbfb67ef08f56aa33.GIF)](https://oss-global-cdn.unitree.com/static/5aa48535ffd641e2932c0ba45c8e7854.mp4)  |  [![mujoco_h1](https://oss-global-cdn.unitree.com/static/7ab4e8392e794e01b975efa205ef491e.GIF)](https://oss-global-cdn.unitree.com/static/8934052becd84d08bc8c18c95849cf32.mp4)  |  [![mujoco_h1_2](https://oss-global-cdn.unitree.com/static/2905e2fe9b3340159d749d5e0bc95cc4.GIF)](https://oss-global-cdn.unitree.com/static/ee7ee85bd6d249989a905c55c7a9d305.mp4) |
 
+#### Export Headless Video
+
+To export a headless Mujoco video or GIF for a policy model, run:
+
+```bash
+python scripts/export_mujoco_video.py --model deploy/pre_train/g1/motion.pt
+```
+
+Optional arguments:
+
+- `--config`: Mujoco config name under `deploy/deploy_mujoco/configs/` (default: `g1.yaml`)
+- `--format`: `gif` or `mp4` (default: `gif`)
+- `--output`: custom output path
+- `--duration`: simulated seconds to render
+- `--fps`, `--width`, `--height`: output media settings
+
+By default, the script uses `MUJOCO_GL=osmesa` so it can render without a desktop display.
+
 
 ---
 
@@ -197,4 +215,3 @@ This project is licensed under the [BSD 3-Clause License](./LICENSE):
 3. Any modifications must be disclosed.
 
 For details, please read the full [LICENSE file](./LICENSE).
-
