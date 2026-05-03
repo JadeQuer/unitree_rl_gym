@@ -128,6 +128,10 @@ def parse_args() -> argparse.Namespace:
         metavar=("X", "Y"),
         help="Local goal position in the world frame relative to start (default: 4.0 0.0)",
     )
+    parser.add_argument(
+        "--goal-policy",
+        help="Optional TorchScript goal command policy. If set, it predicts vx/vy/yaw_rate from goal-relative observations.",
+    )
     return parser.parse_args()
 
 
@@ -164,6 +168,7 @@ def main() -> None:
     data = mujoco.MjData(model)
     model.opt.timestep = simulation_dt
     policy = torch.jit.load(str(model_path))
+    goal_policy = torch.jit.load(args.goal_policy) if args.goal_policy else None
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
 
     camera = mujoco.MjvCamera()
@@ -211,18 +216,38 @@ def main() -> None:
             sin_phase = np.sin(2 * np.pi * phase)
             cos_phase = np.cos(2 * np.pi * phase)
 
-            goal_vec = goal + start_xy - data.qpos[:2]
-            goal_dist = np.linalg.norm(goal_vec) + 1e-6
-            goal_dir = goal_vec / goal_dist
-            heading = get_heading(data.qpos[3:7].copy())
+            goal_vec = goal + start_xy - data.qpos[:2] # 当前机器人到目标的二维向量
+            goal_dist = np.linalg.norm(goal_vec) + 1e-6 # 当前距离，添加小值避免除零
+            goal_dir = goal_vec / goal_dist # 目标方向的单位向量
+            heading = get_heading(data.qpos[3:7].copy()) 
             goal_heading = np.arctan2(goal_dir[1], goal_dir[0])
-            heading_error = (goal_heading - heading + np.pi) % (2 * np.pi) - np.pi
+            heading_error = (goal_heading - heading + np.pi) % (2 * np.pi) - np.pi # 目标方向和当前方向的角度差
 
-            cmd[0] = np.clip(goal_dist * 0.45, 0.0, 0.5)
-            if goal_dist < 0.45:
-                cmd[0] = 0.0
-            cmd[1] = np.clip(goal_dir[1] * 0.15, -0.15, 0.15)
-            cmd[2] = np.clip(heading_error * 0.8, -0.5, 0.5)
+            if goal_policy is None:
+                cmd[0] = np.clip(goal_dist * 0.45, 0.0, 0.5)
+                if goal_dist < 0.45: # 避免机器人冲过头
+                    cmd[0] = 0.0
+                cmd[1] = np.clip(goal_dir[1] * 0.15, -0.15, 0.15) # 侧向速度根据目标方向的y分量调整
+                cmd[2] = np.clip(heading_error * 0.8, -0.5, 0.5) # 角度误差越大，转速越快，但限制在[-0.5, 0.5]范围内防止疯狂打转
+            else:
+                cos_h = np.cos(heading)
+                sin_h = np.sin(heading)
+                body_goal_x = cos_h * goal_vec[0] + sin_h * goal_vec[1]
+                body_goal_y = -sin_h * goal_vec[0] + cos_h * goal_vec[1]
+                body_goal_dist = np.linalg.norm([body_goal_x, body_goal_y]) + 1e-6
+                goal_obs = np.array(
+                    [
+                        np.clip(goal_dist / 4.5, 0.0, 1.5),
+                        body_goal_x / body_goal_dist,
+                        body_goal_y / body_goal_dist,
+                        heading_error / np.pi,
+                    ],
+                    dtype=np.float32,
+                )
+                with torch.no_grad():
+                    cmd[:] = goal_policy(torch.from_numpy(goal_obs).unsqueeze(0)).numpy().squeeze()
+                if goal_dist < 0.45:
+                    cmd[0] = 0.0
 
             obs[:3] = omega
             obs[3:6] = gravity
